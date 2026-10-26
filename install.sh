@@ -1,15 +1,18 @@
-cat << 'EOF' > run.sh
 #!/bin/bash
 
-# 检查是否传入了 Cloudflare Tunnel Token
+# ==============================================================================
+# InstaBox 一键部署脚本 (Node.js 核心 + Web管理后台 + Cloudflare Tunnel + 内部保活)
+# ==============================================================================
+
+# 1. 参数校验：检查是否传入了 Cloudflare Tunnel Token
 CF_TOKEN="$1"
 if [ -z "$CF_TOKEN" ]; then
-    echo -e "\033[31m[错误] 请在运行脚本时携带 Cloudflare Tunnel Token！\033[0m"
-    echo -e "使用方法: bash run.sh <你的Cloudflare_Token> [UUID]"
+    echo -e "\033[31m[错误] 缺少必要参数！请在运行命令末尾携带 Cloudflare Tunnel Token。\033[0m"
+    echo -e "使用方法: bash $0 <你的Cloudflare_Token> [可选UUID]"
     exit 1
 fi
 
-# 检查或生成 UUID
+# 2. 检查或生成 UUID
 UUID="$2"
 if [ -z "$UUID" ]; then
     if command -v uuidgen >/dev/null 2>&1; then
@@ -23,17 +26,17 @@ WORK_DIR="/tmp/tunnel_server"
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR" || exit 1
 
-# 1. 确保安装了 Node.js 与 curl
-echo -e "\033[32m[*] 正在检查系统基础环境...\033[0m"
-if ! command -v node >/dev/null 2>&1; then
+# 3. 检查系统依赖环境 (Node.js, curl, bc)
+echo -e "\033[32m[*] 正在检查系统基础依赖...\033[0m"
+if ! command -v node >/dev/null 2>&1 || ! command -v bc >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y && apt-get install -y nodejs curl
+        apt-get update -y && apt-get install -y nodejs curl bc
     elif command -v apk >/dev/null 2>&1; then
-        apk update && apk add nodejs curl
+        apk update && apk add nodejs curl bc
     fi
 fi
 
-# 2. 准备 cloudflared 二进制程序
+# 4. 下载 cloudflared 二进制程序
 if [ ! -f "cloudflared" ]; then
     echo -e "\033[32m[*] 正在下载 cloudflared 二进制...\033[0m"
     ARCH=$(uname -m)
@@ -52,7 +55,7 @@ if [ ! -f "cloudflared" ]; then
     chmod +x cloudflared
 fi
 
-# 3. 生成 Node.js 代理与 Web 管理后台核心 (server.js)
+# 5. 生成 Node.js 代理与 Web 管理后台核心 (server.js)
 echo -e "\033[32m[*] 正在生成核心服务代码...\033[0m"
 cat << 'APP_EOF' > server.js
 const http = require('http');
@@ -60,7 +63,7 @@ const net = require('net');
 const crypto = require('crypto');
 const os = require('os');
 
-// 从环境变量读取配置
+// 从环境变量读取端口和 UUID
 const PORT = process.env.PORT || 8001;
 const UUID = process.env.UUID || 'a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d';
 const WS_PATH = '/vless';
@@ -421,26 +424,58 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 APP_EOF
 
-# 4. 清理旧进程并启动
+# 6. 生成内部保活脚本 (keepalive.sh)
+echo -e "\033[32m[*] 正在配置内部仿真保活模块...\033[0m"
+cat << 'KEEP_EOF' > keepalive.sh
+#!/bin/bash
+# InstaBox 内部微活动保活模块（防 30 分钟无操作挂起）
+LOG_FILE="/tmp/tunnel_server/keepalive.log"
+
+while true; do
+    # 1. 微量文件写入与时间戳刷新
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] KeepAlive Heartbeat Active" >> "$LOG_FILE"
+
+    # 2. 定期访问外部公网 DNS/HTTPS，产生真实的网络出站活动流量
+    curl -s -m 5 https://1.1.1.1 > /dev/null 2>&1
+
+    # 3. 产生瞬时微量 CPU 活动（计算圆周率，耗时几毫秒，不占负载但打破完全闲置判定）
+    if command -v bc >/dev/null 2>&1; then
+        echo "scale=50; 4*a(1)" | bc -l > /dev/null 2>&1
+    fi
+
+    # 4. 自动截断日志，仅保留最近 200 行，绝不浪费磁盘空间
+    tail -n 200 "$LOG_FILE" > "${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+
+    # 每 3 分钟（180 秒）执行一次，确保远低于 30 分钟休眠判定
+    sleep 180
+done
+KEEP_EOF
+chmod +x keepalive.sh
+
+# 7. 清理旧有进程
 pkill -f "node server.js" 2>/dev/null
 pkill -f "cloudflared" 2>/dev/null
+pkill -f "keepalive.sh" 2>/dev/null
 
-echo -e "\033[32m[*] 正在后台启动 Node.js 核心服务...\033[0m"
+# 8. 后台启动服务
+echo -e "\033[32m[*] 正在启动 Node.js 核心服务 (端口 8001)...\033[0m"
 PORT=8001 UUID="$UUID" nohup node server.js > server.log 2>&1 &
 
-echo -e "\033[32m[*] 正在建立 Cloudflare 隧道连接...\033[0m"
+echo -e "\033[32m[*] 正在启动 Cloudflare 隧道连接...\033[0m"
 nohup ./cloudflared tunnel run --token "$CF_TOKEN" > tunnel.log 2>&1 &
+
+echo -e "\033[32m[*] 正在启动内部定时保活守护进程...\033[0m"
+nohup ./keepalive.sh > /dev/null 2>&1 &
 
 sleep 3
 
+# 9. 部署完成输出提示
 echo -e "\n\033[32m====================================================\033[0m"
-echo -e "\033[32m服务已成功部署并运行！\033[0m"
+echo -e "\033[32m服务及内部防休眠保活已全部就绪！\033[0m"
 echo -e "监听端口: 8001"
 echo -e "用户 UUID: $UUID"
 echo -e "WS 路径:   /vless"
-echo -e "管理面板: 打开你的隧道域名（例如: https://eee.abcai.online）"
-echo -e "查看日志: tail -f $WORK_DIR/tunnel.log 或 tail -f $WORK_DIR/server.log"
+echo -e "保活状态: 每 3 分钟执行微网络与轻量系统活动"
+echo -e "管理控制台: 访问你的 Cloudflare 域名"
+echo -e "实时日志: tail -f $WORK_DIR/server.log"
 echo -e "\033[32m====================================================\033[0m\n"
-EOF
-
-chmod +x run.sh
