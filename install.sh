@@ -1,19 +1,24 @@
 #!/bin/bash
 
 # ==============================================================================
-# InstaBox 一键部署脚本 (Node.js 核心 + Web管理后台 + Cloudflare Tunnel + 内部保活)
+# InstaBox 一键部署脚本 (无硬编码域名/Token + 动态传参 + Web后台 + 内部保活)
 # ==============================================================================
 
-# 1. 参数校验：检查是否传入了 Cloudflare Tunnel Token
+# 1. 参数校验
 CF_TOKEN="$1"
-if [ -z "$CF_TOKEN" ]; then
-    echo -e "\033[31m[错误] 缺少必要参数！请在运行命令末尾携带 Cloudflare Tunnel Token。\033[0m"
-    echo -e "使用方法: bash $0 <你的Cloudflare_Token> [可选UUID]"
+TUNNEL_DOMAIN="$2"
+UUID="$3"
+
+if [ -z "$CF_TOKEN" ] || [ -z "$TUNNEL_DOMAIN" ]; then
+    echo -e "\033[31m[错误] 缺少必要参数！\033[0m"
+    echo -e "使用方法:"
+    echo -e "  bash $0 <Cloudflare_Token> <隧道域名> [可选UUID]"
+    echo -e "示例:"
+    echo -e "  bash $0 eyJhIjoi... eee.abcai.online"
     exit 1
 fi
 
 # 2. 检查或生成 UUID
-UUID="$2"
 if [ -z "$UUID" ]; then
     if command -v uuidgen >/dev/null 2>&1; then
         UUID=$(uuidgen)
@@ -55,7 +60,7 @@ if [ ! -f "cloudflared" ]; then
     chmod +x cloudflared
 fi
 
-# 5. 生成 Node.js 代理与 Web 管理后台核心 (server.js)
+# 5. 生成 Node.js 核心服务 (代码内无任何特定域名与 Token)
 echo -e "\033[32m[*] 正在生成核心服务代码...\033[0m"
 cat << 'APP_EOF' > server.js
 const http = require('http');
@@ -63,9 +68,10 @@ const net = require('net');
 const crypto = require('crypto');
 const os = require('os');
 
-// 从环境变量读取端口和 UUID
+// 从系统环境变量动态读取参数
 const PORT = process.env.PORT || 8001;
 const UUID = process.env.UUID || 'a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d';
+const DOMAIN = process.env.DOMAIN || '';
 const WS_PATH = '/vless';
 
 // 转换 UUID 为 16 字节 Buffer
@@ -93,8 +99,8 @@ function recordLog(msg) {
 const server = http.createServer((req, res) => {
     // API: 获取运行状态与节点信息
     if (req.url === '/api/status') {
-        const hostname = req.headers.host || 'eee.abcai.online';
-        const vlessLink = `vless://${UUID}@${hostname}:443?encryption=none&security=tls&type=ws&host=${hostname}&path=${encodeURIComponent(WS_PATH)}#InstaBox-${hostname}`;
+        const displayDomain = DOMAIN || req.headers.host || '127.0.0.1';
+        const vlessLink = `vless://${UUID}@${displayDomain}:443?encryption=none&security=tls&type=ws&host=${displayDomain}&path=${encodeURIComponent(WS_PATH)}#InstaBox-${displayDomain}`;
         
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
@@ -105,7 +111,7 @@ const server = http.createServer((req, res) => {
             bytesOut: totalBytesOut,
             uuid: UUID,
             path: WS_PATH,
-            domain: hostname,
+            domain: displayDomain,
             vlessNode: vlessLink,
             logs: logs
         }));
@@ -236,14 +242,12 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // 默认返回 404
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Not Found');
 });
 
 // 处理 WebSocket Upgrade 握手 (VLESS 协议转发)
 server.on('upgrade', (req, socket, head) => {
-    // 仅匹配设定路径
     if (!req.url.startsWith(WS_PATH)) {
         socket.destroy();
         return;
@@ -255,7 +259,6 @@ server.on('upgrade', (req, socket, head) => {
         return;
     }
 
-    // 完成 WebSocket 标准握手
     const hash = crypto.createHash('sha1');
     hash.update(secWsKey + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11');
     const secAccept = hash.digest('base64');
@@ -275,7 +278,6 @@ server.on('upgrade', (req, socket, head) => {
     let targetSocket = null;
     let initialBuffer = head || Buffer.alloc(0);
 
-    // 解析 WebSocket 数据帧
     function unmaskWsPayload(buffer) {
         if (buffer.length < 2) return null;
         let offset = 2;
@@ -304,13 +306,12 @@ server.on('upgrade', (req, socket, head) => {
         return { payload, totalLen: offset + payloadLen };
     }
 
-    // 打包 WebSocket 二进制帧回传客户端
     function makeWsFrame(payload) {
         const len = payload.length;
         let header;
         if (len < 126) {
             header = Buffer.alloc(2);
-            header[0] = 0x82; // 二进制帧, FIN
+            header[0] = 0x82;
             header[1] = len;
         } else if (len <= 0xffff) {
             header = Buffer.alloc(4);
@@ -326,7 +327,6 @@ server.on('upgrade', (req, socket, head) => {
         return Buffer.concat([header, payload]);
     }
 
-    // 数据流动监听
     socket.on('data', (chunk) => {
         totalBytesIn += chunk.length;
         initialBuffer = Buffer.concat([initialBuffer, chunk]);
@@ -338,7 +338,6 @@ server.on('upgrade', (req, socket, head) => {
             const data = frame.payload;
 
             if (!isHandshakeComplete) {
-                // VLESS 握手认证
                 if (data.length < 17) continue;
                 const clientUuid = data.slice(1, 17);
                 if (Buffer.compare(clientUuid, uuidBuffer) !== 0) {
@@ -350,7 +349,7 @@ server.on('upgrade', (req, socket, head) => {
                 let p = 17;
                 const optLen = data[p];
                 p += 1 + optLen;
-                const cmd = data[p]; // 1: TCP, 2: UDP
+                const cmd = data[p];
                 p += 1;
                 const port = data.readUInt16BE(p);
                 p += 2;
@@ -358,15 +357,15 @@ server.on('upgrade', (req, socket, head) => {
                 p += 1;
 
                 let address = '';
-                if (addrType === 1) { // IPv4
+                if (addrType === 1) {
                     address = data.slice(p, p + 4).join('.');
                     p += 4;
-                } else if (addrType === 2) { // Domain
+                } else if (addrType === 2) {
                     const domainLen = data[p];
                     p += 1;
                     address = data.slice(p, p + domainLen).toString();
                     p += domainLen;
-                } else if (addrType === 3) { // IPv6
+                } else if (addrType === 3) {
                     address = data.slice(p, p + 16).toString('hex').match(/.{1,4}/g).join(':');
                     p += 16;
                 }
@@ -374,10 +373,8 @@ server.on('upgrade', (req, socket, head) => {
                 const remainPayload = data.slice(p);
                 isHandshakeComplete = true;
 
-                // 连接远端目标地址
                 targetSocket = net.connect({ host: address, port: port }, () => {
                     recordLog(`成功转发流量到 -> ${address}:${port}`);
-                    // 回复 VLESS 握手响应包 (版本0, 附加长度0)
                     const vlessRes = Buffer.from([0, 0]);
                     socket.write(makeWsFrame(vlessRes));
 
@@ -424,29 +421,19 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 APP_EOF
 
-# 6. 生成内部保活脚本 (keepalive.sh)
+# 6. 生成内部保活守护模块 (keepalive.sh)
 echo -e "\033[32m[*] 正在配置内部仿真保活模块...\033[0m"
 cat << 'KEEP_EOF' > keepalive.sh
 #!/bin/bash
-# InstaBox 内部微活动保活模块（防 30 分钟无操作挂起）
 LOG_FILE="/tmp/tunnel_server/keepalive.log"
 
 while true; do
-    # 1. 微量文件写入与时间戳刷新
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] KeepAlive Heartbeat Active" >> "$LOG_FILE"
-
-    # 2. 定期访问外部公网 DNS/HTTPS，产生真实的网络出站活动流量
     curl -s -m 5 https://1.1.1.1 > /dev/null 2>&1
-
-    # 3. 产生瞬时微量 CPU 活动（计算圆周率，耗时几毫秒，不占负载但打破完全闲置判定）
     if command -v bc >/dev/null 2>&1; then
         echo "scale=50; 4*a(1)" | bc -l > /dev/null 2>&1
     fi
-
-    # 4. 自动截断日志，仅保留最近 200 行，绝不浪费磁盘空间
     tail -n 200 "$LOG_FILE" > "${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE"
-
-    # 每 3 分钟（180 秒）执行一次，确保远低于 30 分钟休眠判定
     sleep 180
 done
 KEEP_EOF
@@ -459,7 +446,7 @@ pkill -f "keepalive.sh" 2>/dev/null
 
 # 8. 后台启动服务
 echo -e "\033[32m[*] 正在启动 Node.js 核心服务 (端口 8001)...\033[0m"
-PORT=8001 UUID="$UUID" nohup node server.js > server.log 2>&1 &
+PORT=8001 UUID="$UUID" DOMAIN="$TUNNEL_DOMAIN" nohup node server.js > server.log 2>&1 &
 
 echo -e "\033[32m[*] 正在启动 Cloudflare 隧道连接...\033[0m"
 nohup ./cloudflared tunnel run --token "$CF_TOKEN" > tunnel.log 2>&1 &
@@ -471,11 +458,12 @@ sleep 3
 
 # 9. 部署完成输出提示
 echo -e "\n\033[32m====================================================\033[0m"
-echo -e "\033[32m服务及内部防休眠保活已全部就绪！\033[0m"
-echo -e "监听端口: 8001"
+echo -e "\033[32m服务已成功启动！\033[0m"
+echo -e "绑定域名: $TUNNEL_DOMAIN"
 echo -e "用户 UUID: $UUID"
 echo -e "WS 路径:   /vless"
-echo -e "保活状态: 每 3 分钟执行微网络与轻量系统活动"
-echo -e "管理控制台: 访问你的 Cloudflare 域名"
+echo -e "本地监听: 8001"
+echo -e "管理后台: https://$TUNNEL_DOMAIN"
+echo -e "保活状态: 内部心跳每 3 分钟运行一次"
 echo -e "实时日志: tail -f $WORK_DIR/server.log"
 echo -e "\033[32m====================================================\033[0m\n"
