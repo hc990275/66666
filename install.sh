@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# InstaBox 终极版 (v1.0.7: 修复404报错 + 主页秒开 + 5组优选订阅 + 原生Xray极速)
+# InstaBox 终极版 (v1.0.8: 精准PID强杀旧进程释放8001 + 修复WS握手 + 5组优选订阅)
 # ==============================================================================
 
-SCRIPT_VERSION="v1.0.7"
+SCRIPT_VERSION="v1.0.8"
 
 CF_TOKEN="$1"
 TUNNEL_DOMAIN="$2"
@@ -33,12 +33,10 @@ echo -e "\033[36m====================================================\033[0m"
 echo -e "\033[36m[*] 正在执行部署，当前安装版本: $SCRIPT_VERSION\033[0m"
 echo -e "\033[36m====================================================\033[0m"
 
-# 1. 基础依赖检查
-if [ "$(id -u)" -eq 0 ]; then
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y && apt-get install -y nodejs curl unzip bc procps
-    fi
-fi
+# 1. 强力清理所有历史残留进程（通过 ps + awk 精准提取 PID 强杀，兼容无 killall 环境）
+echo -e "\033[33m[*] 正在强制清理旧进程并释放 8001 端口...\033[0m"
+ps -ef | grep -E "xray|cloudflared|node|keepalive\.sh" | grep -v grep | awk '{print $2}' | xargs -r kill -9 2>/dev/null
+sleep 2
 
 # 2. 准备 cloudflared
 if [ ! -f "cloudflared" ]; then
@@ -66,7 +64,7 @@ if [ ! -f "xray" ]; then
     chmod +x xray
 fi
 
-# 4. 生成 Xray 配置 (让 Xray 在 8002 监听 WS，8003 监听 gRPC，8004 监听 XHTTP)
+# 4. 生成 Xray 配置 (8002: WS, 8003: gRPC, 8004: XHTTP，彻底让出 8001 给前置网关)
 cat << EOF > config.json
 {
   "log": { "loglevel": "warning" },
@@ -121,7 +119,7 @@ cat << EOF > config.json
 }
 EOF
 
-# 5. 生成前置 Web & 网关服务 (监听 8001 主端口，彻底消灭 404)
+# 5. 生成前置 Web & 零损耗分流网关 (独占 8001 端口)
 cat << 'WEB_EOF' > gateway.js
 const http = require('http');
 const net = require('net');
@@ -129,9 +127,8 @@ const net = require('net');
 const PORT = 8001;
 const DOMAIN = process.env.DOMAIN || '';
 const UUID = process.env.UUID || '';
-const VERSION = process.env.VERSION || 'v1.0.7';
+const VERSION = process.env.VERSION || 'v1.0.8';
 
-// 专属优选域名
 const PREFERRED_DOMAINS = [
     { name: "IP.SB优选", host: "ip.sb" },
     { name: "万事达优选", host: "www.mastercard.com" },
@@ -144,11 +141,10 @@ const server = http.createServer((req, res) => {
     const currentDomain = DOMAIN || req.headers.host || '127.0.0.1';
 
     // 1. 通用 Base64 订阅 (/sub)
-    if (req.url === '/sub') {
+    if (req.url.startsWith('/sub')) {
         const nodeList = [];
         nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&mode=packet-up&sni=${currentDomain}&host=${currentDomain}#InstaBox-${VERSION}-默认直连-XHTTP`);
-        nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=grpc&serviceName=vless-grpc&mode=multi&sni=${currentDomain}#InstaBox-${VERSION}-默认直连-gRPC`);
-        nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=ws&host=${currentDomain}&path=%2Fvless#InstaBox-${VERSION}-默认直连-WS`);
+        nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=ws&host=${currentDomain}&path=%2Fvless&sni=${currentDomain}#InstaBox-${VERSION}-默认直连-WS`);
 
         PREFERRED_DOMAINS.forEach(item => {
             nodeList.push(`vless://${UUID}@${item.host}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&mode=packet-up&sni=${currentDomain}&host=${currentDomain}#InstaBox-${item.name}-XHTTP`);
@@ -166,7 +162,7 @@ const server = http.createServer((req, res) => {
     }
 
     // 2. Clash 订阅 (/clash)
-    if (req.url === '/clash') {
+    if (req.url.startsWith('/clash')) {
         let clashYaml = `port: 7890
 socks-port: 7891
 allow-lan: false
@@ -249,7 +245,7 @@ proxies:
         return;
     }
 
-    // 3. XHTTP 或普通 HTTP 代理转发给 Xray (8004 端口)
+    // 3. XHTTP 代理请求转发给 Xray (8004)
     if (req.url.startsWith('/xhttp')) {
         const proxyReq = http.request({
             host: '127.0.0.1',
@@ -266,7 +262,7 @@ proxies:
         return;
     }
 
-    // 4. 控制台主页 (根路径 / 或任意其他普通访问)
+    // 4. 其余所有路径均返回 Web 控制中心主页 (绝不返回 404)
     const subUrl = `https://${currentDomain}/sub`;
     const clashUrl = `https://${currentDomain}/clash`;
 
@@ -327,7 +323,7 @@ proxies:
             <h2>运行环境</h2>
             <div class="meta-line">当前版本: <strong style="color: #38bdf8;">${VERSION}</strong></div>
             <div class="meta-line">绑定域名: <strong>${currentDomain}</strong></div>
-            <div class="meta-line">核心驱动: <strong>Xray-core 原生极速分流 (XHTTP / gRPC / WS)</strong></div>
+            <div class="meta-line">核心驱动: <strong>Xray-core 原生极速分流 (XHTTP / WS)</strong></div>
             <div class="meta-line">加速配置: <strong>已注入 ip.sb / mastercard / shopify / visa / saas.sin.fan</strong></div>
         </div>
     </div>
@@ -350,11 +346,17 @@ proxies:
     res.end(html);
 });
 
-// 处理 WebSocket Upgrade 握手，直接零拷贝管道透传给 Xray (8002 端口)
+// 完整重构 WebSocket Upgrade 转发给 Xray (8002 端口)
 server.on('upgrade', (req, socket, head) => {
     if (req.url.startsWith('/vless')) {
         const proxySocket = net.connect({ host: '127.0.0.1', port: 8002 }, () => {
-            proxySocket.write(head);
+            let reqHeaders = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+            for (let i = 0; i < req.rawHeaders.length; i += 2) {
+                reqHeaders += `${req.rawHeaders[i]}: ${req.rawHeaders[i+1]}\r\n`;
+            }
+            reqHeaders += '\r\n';
+            proxySocket.write(reqHeaders);
+            if (head && head.length > 0) proxySocket.write(head);
             socket.pipe(proxySocket).pipe(socket);
         });
         proxySocket.on('error', () => socket.destroy());
@@ -364,7 +366,9 @@ server.on('upgrade', (req, socket, head) => {
     }
 });
 
-server.listen(PORT, '0.0.0.0');
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Gateway listening on 0.0.0.0:${PORT}`);
+});
 WEB_EOF
 
 # 6. 防休眠守护 (keepalive.sh)
@@ -379,23 +383,12 @@ done
 KEEP_EOF
 chmod +x keepalive.sh
 
-# 7. 强杀历史进程
-killall -9 node 2>/dev/null
-killall -9 xray 2>/dev/null
-killall -9 cloudflared 2>/dev/null
-pkill -9 -f "server.js" 2>/dev/null
-pkill -9 -f "web_server.js" 2>/dev/null
-pkill -9 -f "gateway.js" 2>/dev/null
-pkill -9 -f "keepalive.sh" 2>/dev/null
-
-sleep 1
-
-# 8. 启动全部进程
-echo -e "\033[32m[*] 正在后台启动网关与 Web 控制中心 (版本: $SCRIPT_VERSION)...\033[0m"
-UUID="$UUID" DOMAIN="$TUNNEL_DOMAIN" VERSION="$SCRIPT_VERSION" nohup node gateway.js > gateway.log 2>&1 &
-
-echo -e "\033[32m[*] 正在启动 Xray 原生多协议分流引擎...\033[0m"
+# 7. 按顺序启动全部进程
+echo -e "\033[32m[*] 正在启动 Xray 原生多核引擎 (后端端口 8002/8003/8004)...\033[0m"
 nohup ./xray -config config.json > xray.log 2>&1 &
+
+echo -e "\033[32m[*] 正在启动前置网关与 Web 控制中心 (监听 8001 主端口, 版本: $SCRIPT_VERSION)...\033[0m"
+UUID="$UUID" DOMAIN="$TUNNEL_DOMAIN" VERSION="$SCRIPT_VERSION" nohup node gateway.js > gateway.log 2>&1 &
 
 echo -e "\033[32m[*] 正在连接 Cloudflare 官方隧道...\033[0m"
 nohup ./cloudflared tunnel run --token "$CF_TOKEN" > tunnel.log 2>&1 &
@@ -405,17 +398,24 @@ nohup ./keepalive.sh > /dev/null 2>&1 &
 
 sleep 3
 
-# 9. 输出结果
-SUB_LINK="https://${TUNNEL_DOMAIN}/sub"
-CLASH_LINK="https://${TUNNEL_DOMAIN}/clash"
+# 8. 严格检查进程是否存活
+echo -e "\n\033[36m==================== 运行状态自检 ====================\033[0m"
+ps -ef | grep -E "xray|cloudflared|gateway\.js" | grep -v grep
 
-echo -e "\n\033[32m====================================================\033[0m"
-echo -e "\033[32m[OK] 部署成功！当前运行版本: \033[33m$SCRIPT_VERSION\033[0m"
-echo -e "管理控制台: https://${TUNNEL_DOMAIN}"
-echo -e "----------------------------------------------------"
-echo -e "\033[32m[通用订阅地址 (Base64)]:\033[0m"
-echo -e "$SUB_LINK"
-echo -e ""
-echo -e "\033[36m[Clash/Mihomo 配置文件订阅]:\033[0m"
-echo -e "$CLASH_LINK"
-echo -e "\033[32m====================================================\033[0m\n"
+if ! ps -ef | grep "gateway.js" | grep -v grep > /dev/null; then
+    echo -e "\033[31m[错误] gateway.js 未能成功启动！日志如下：\033[0m"
+    cat gateway.log
+else
+    SUB_LINK="https://${TUNNEL_DOMAIN}/sub"
+    CLASH_LINK="https://${TUNNEL_DOMAIN}/clash"
+    echo -e "\n\033[32m====================================================\033[0m"
+    echo -e "\033[32m[OK] 部署成功！当前运行版本: \033[33m$SCRIPT_VERSION\033[0m"
+    echo -e "管理控制台: https://${TUNNEL_DOMAIN}"
+    echo -e "----------------------------------------------------"
+    echo -e "\033[32m[通用订阅地址 (Base64)]:\033[0m"
+    echo -e "$SUB_LINK"
+    echo -e ""
+    echo -e "\033[36m[Clash/Mihomo 配置文件订阅]:\033[0m"
+    echo -e "$CLASH_LINK"
+    echo -e "\033[32m====================================================\033[0m\n"
+fi
