@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# InstaBox 终极版 (v1.0.6: 集成专属优选域名 + 订阅生成 + 极简主页 + 强杀旧进程)
+# InstaBox 终极版 (v1.0.7: 修复404报错 + 主页秒开 + 5组优选订阅 + 原生Xray极速)
 # ==============================================================================
 
-SCRIPT_VERSION="v1.0.6"
+SCRIPT_VERSION="v1.0.7"
 
 CF_TOKEN="$1"
 TUNNEL_DOMAIN="$2"
@@ -40,7 +40,7 @@ if [ "$(id -u)" -eq 0 ]; then
     fi
 fi
 
-# 2. 准备 cloudflared 客户端
+# 2. 准备 cloudflared
 if [ ! -f "cloudflared" ]; then
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -66,34 +66,18 @@ if [ ! -f "xray" ]; then
     chmod +x xray
 fi
 
-# 4. 生成 Xray 单端口复合路由配置 (8001 主端口直通，未匹配回落至 8080)
+# 4. 生成 Xray 配置 (让 Xray 在 8002 监听 WS，8003 监听 gRPC，8004 监听 XHTTP)
 cat << EOF > config.json
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
     {
-      "port": 8001,
-      "listen": "0.0.0.0",
+      "port": 8002,
+      "listen": "127.0.0.1",
       "protocol": "vless",
       "settings": {
         "clients": [{ "id": "${UUID}", "level": 0 }],
-        "decryption": "none",
-        "fallbacks": [
-          {
-            "path": "/xhttp",
-            "dest": 8004,
-            "xver": 0
-          },
-          {
-            "alpn": "h2",
-            "path": "/vless-grpc",
-            "dest": 8003,
-            "xver": 0
-          },
-          {
-            "dest": 8080
-          }
-        ]
+        "decryption": "none"
       },
       "streamSettings": {
         "network": "ws",
@@ -137,15 +121,17 @@ cat << EOF > config.json
 }
 EOF
 
-# 5. 生成集成订阅服务与管理主页的 Web 服务器 (8080 端口)
-cat << 'WEB_EOF' > web_server.js
+# 5. 生成前置 Web & 网关服务 (监听 8001 主端口，彻底消灭 404)
+cat << 'WEB_EOF' > gateway.js
 const http = require('http');
-const PORT = 8080;
+const net = require('net');
+
+const PORT = 8001;
 const DOMAIN = process.env.DOMAIN || '';
 const UUID = process.env.UUID || '';
-const VERSION = process.env.VERSION || 'v1.0.6';
+const VERSION = process.env.VERSION || 'v1.0.7';
 
-// 用户指定的优质优选域名列表
+// 专属优选域名
 const PREFERRED_DOMAINS = [
     { name: "IP.SB优选", host: "ip.sb" },
     { name: "万事达优选", host: "www.mastercard.com" },
@@ -157,16 +143,13 @@ const PREFERRED_DOMAINS = [
 const server = http.createServer((req, res) => {
     const currentDomain = DOMAIN || req.headers.host || '127.0.0.1';
 
-    // 1. 通用 Base64 订阅接口 (/sub)
+    // 1. 通用 Base64 订阅 (/sub)
     if (req.url === '/sub') {
         const nodeList = [];
-
-        // 官方直连主节点
         nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&mode=packet-up&sni=${currentDomain}&host=${currentDomain}#InstaBox-${VERSION}-默认直连-XHTTP`);
         nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=grpc&serviceName=vless-grpc&mode=multi&sni=${currentDomain}#InstaBox-${VERSION}-默认直连-gRPC`);
         nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=ws&host=${currentDomain}&path=%2Fvless#InstaBox-${VERSION}-默认直连-WS`);
 
-        // 用户指定优选域名的加速节点 (Address 指向优选，SNI/Host 走原隧道域名)
         PREFERRED_DOMAINS.forEach(item => {
             nodeList.push(`vless://${UUID}@${item.host}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&mode=packet-up&sni=${currentDomain}&host=${currentDomain}#InstaBox-${item.name}-XHTTP`);
             nodeList.push(`vless://${UUID}@${item.host}:443?encryption=none&security=tls&type=ws&host=${currentDomain}&path=%2Fvless&sni=${currentDomain}#InstaBox-${item.name}-WS`);
@@ -182,7 +165,7 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // 2. Clash / Mihomo 配置文件订阅接口 (/clash)
+    // 2. Clash 订阅 (/clash)
     if (req.url === '/clash') {
         let clashYaml = `port: 7890
 socks-port: 7891
@@ -266,7 +249,24 @@ proxies:
         return;
     }
 
-    // 3. Web 控制台主页 (极简展示)
+    // 3. XHTTP 或普通 HTTP 代理转发给 Xray (8004 端口)
+    if (req.url.startsWith('/xhttp')) {
+        const proxyReq = http.request({
+            host: '127.0.0.1',
+            port: 8004,
+            path: req.url,
+            method: req.method,
+            headers: req.headers
+        }, (proxyRes) => {
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            proxyRes.pipe(res);
+        });
+        proxyReq.on('error', () => res.end());
+        req.pipe(proxyReq);
+        return;
+    }
+
+    // 4. 控制台主页 (根路径 / 或任意其他普通访问)
     const subUrl = `https://${currentDomain}/sub`;
     const clashUrl = `https://${currentDomain}/clash`;
 
@@ -293,7 +293,7 @@ proxies:
         .sub-group:last-child { margin-bottom: 0; }
         .sub-title { font-size: 13px; color: #94a3b8; margin-bottom: 6px; font-weight: 500; }
         .sub-box { background: #0f172a; border: 1px solid #334155; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 13px; word-break: break-all; color: #38bdf8; margin-bottom: 8px; }
-        button { background: #0284c7; color: white; border: none; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.2s; }
+        button { background: #0284c7; color: white; border: none; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
         button:hover { background: #0369a1; }
         button.btn-clash { background: #0d9488; }
         button.btn-clash:hover { background: #0f766e; }
@@ -308,10 +308,10 @@ proxies:
         </div>
 
         <div class="card" style="border-color: #0284c7;">
-            <h2 style="color: #38bdf8;">服务订阅中心 <span class="tag-info">已内置 5 组优选域名</span></h2>
+            <h2 style="color: #38bdf8;">服务订阅中心 <span class="tag-info">内置 5 组优选</span></h2>
             
             <div class="sub-group">
-                <div class="sub-title">通用订阅 (支持 v2rayN / Sing-box / 自动包含 IP.SB、VISA、Shopify 等优选节点):</div>
+                <div class="sub-title">通用订阅 (支持 v2rayN / Sing-box / 蜜蜂版 / 自动聚合节点):</div>
                 <div class="sub-box" id="sub-url">${subUrl}</div>
                 <button onclick="copyText('sub-url')">复制通用订阅地址</button>
             </div>
@@ -350,10 +350,24 @@ proxies:
     res.end(html);
 });
 
+// 处理 WebSocket Upgrade 握手，直接零拷贝管道透传给 Xray (8002 端口)
+server.on('upgrade', (req, socket, head) => {
+    if (req.url.startsWith('/vless')) {
+        const proxySocket = net.connect({ host: '127.0.0.1', port: 8002 }, () => {
+            proxySocket.write(head);
+            socket.pipe(proxySocket).pipe(socket);
+        });
+        proxySocket.on('error', () => socket.destroy());
+        socket.on('error', () => proxySocket.destroy());
+    } else {
+        socket.destroy();
+    }
+});
+
 server.listen(PORT, '0.0.0.0');
 WEB_EOF
 
-# 6. 生成防休眠后台守护 (keepalive.sh)
+# 6. 防休眠守护 (keepalive.sh)
 cat << 'KEEP_EOF' > keepalive.sh
 #!/bin/bash
 while true; do
@@ -365,27 +379,28 @@ done
 KEEP_EOF
 chmod +x keepalive.sh
 
-# 7. 强杀所有历史旧进程
+# 7. 强杀历史进程
 killall -9 node 2>/dev/null
 killall -9 xray 2>/dev/null
 killall -9 cloudflared 2>/dev/null
 pkill -9 -f "server.js" 2>/dev/null
 pkill -9 -f "web_server.js" 2>/dev/null
+pkill -9 -f "gateway.js" 2>/dev/null
 pkill -9 -f "keepalive.sh" 2>/dev/null
 
 sleep 1
 
 # 8. 启动全部进程
-echo -e "\033[32m[*] 启动 Web 控制中心与订阅服务 (版本: $SCRIPT_VERSION)...\033[0m"
-UUID="$UUID" DOMAIN="$TUNNEL_DOMAIN" VERSION="$SCRIPT_VERSION" nohup node web_server.js > web.log 2>&1 &
+echo -e "\033[32m[*] 正在后台启动网关与 Web 控制中心 (版本: $SCRIPT_VERSION)...\033[0m"
+UUID="$UUID" DOMAIN="$TUNNEL_DOMAIN" VERSION="$SCRIPT_VERSION" nohup node gateway.js > gateway.log 2>&1 &
 
-echo -e "\033[32m[*] 启动 Xray 原生多协议分流引擎...\033[0m"
+echo -e "\033[32m[*] 正在启动 Xray 原生多协议分流引擎...\033[0m"
 nohup ./xray -config config.json > xray.log 2>&1 &
 
-echo -e "\033[32m[*] 启动 Cloudflare 官方隧道连接...\033[0m"
+echo -e "\033[32m[*] 正在连接 Cloudflare 官方隧道...\033[0m"
 nohup ./cloudflared tunnel run --token "$CF_TOKEN" > tunnel.log 2>&1 &
 
-echo -e "\033[32m[*] 启动防休眠后台守护...\033[0m"
+echo -e "\033[32m[*] 正在启动防休眠后台守护...\033[0m"
 nohup ./keepalive.sh > /dev/null 2>&1 &
 
 sleep 3
@@ -398,7 +413,7 @@ echo -e "\n\033[32m====================================================\033[0m"
 echo -e "\033[32m[OK] 部署成功！当前运行版本: \033[33m$SCRIPT_VERSION\033[0m"
 echo -e "管理控制台: https://${TUNNEL_DOMAIN}"
 echo -e "----------------------------------------------------"
-echo -e "\033[32m[通用订阅地址 (已含上述5个优质优选域名)]:\033[0m"
+echo -e "\033[32m[通用订阅地址 (Base64)]:\033[0m"
 echo -e "$SUB_LINK"
 echo -e ""
 echo -e "\033[36m[Clash/Mihomo 配置文件订阅]:\033[0m"
