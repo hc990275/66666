@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ==============================================================================
-# InstaBox 终极版 (三节点多协议 + 通用Base64订阅 + Clash订阅 + Web控制台 + 保活)
+# InstaBox 终极版 (清爽主页 + 仅显订阅链接与版本号 + Xray多协议 + 内部保活)
 # ==============================================================================
 
-# 版本定义 (递增至 v1.0.3)
-SCRIPT_VERSION="v1.0.3"
+# 版本定义 (递增至 v1.0.4)
+SCRIPT_VERSION="v1.0.4"
 
 CF_TOKEN="$1"
 TUNNEL_DOMAIN="$2"
@@ -140,18 +140,18 @@ cat << EOF > config.json
 }
 EOF
 
-# 5. 生成集成订阅服务与管理主页的 Web 服务器 (8080 端口)
+# 5. 生成清爽 Web 控制中心 (仅保留版本号与订阅链接，移除所有直接节点)
 cat << 'WEB_EOF' > web_server.js
 const http = require('http');
 const PORT = 8080;
 const DOMAIN = process.env.DOMAIN || '';
 const UUID = process.env.UUID || '';
-const VERSION = process.env.VERSION || 'v1.0.3';
+const VERSION = process.env.VERSION || 'v1.0.4';
 
 const server = http.createServer((req, res) => {
     const currentDomain = DOMAIN || req.headers.host || '127.0.0.1';
     
-    // 构造三条标准节点链接
+    // 构造节点数据用于生成订阅
     const linkWs = `vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=ws&host=${currentDomain}&path=%2Fvless#InstaBox-${VERSION}-WS`;
     const linkGrpc = `vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=grpc&serviceName=vless-grpc&mode=multi&sni=${currentDomain}#InstaBox-${VERSION}-gRPC`;
     const linkXhttp = `vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&mode=packet-up&sni=${currentDomain}&host=${currentDomain}#InstaBox-${VERSION}-XHTTP`;
@@ -227,7 +227,7 @@ rules:
         return;
     }
 
-    // 3. Web 控制台主页
+    // 3. Web 控制台主页 (清爽版，无节点字符串)
     const subUrl = `https://${currentDomain}/sub`;
     const clashUrl = `https://${currentDomain}/clash`;
 
@@ -239,68 +239,55 @@ rules:
     <title>InstaBox 控制中心 - ${VERSION}</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b1120; color: #f8fafc; padding: 24px 16px; }
-        .container { max-width: 820px; margin: 0 auto; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b1120; color: #f8fafc; padding: 32px 16px; }
+        .container { max-width: 680px; margin: 0 auto; }
         .header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1e293b; padding-bottom: 16px; margin-bottom: 24px; }
         .header h1 { font-size: 20px; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
-        .ver-badge { background: #3b82f6; color: white; padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+        .ver-badge { background: #0284c7; color: white; padding: 2px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; }
         .badge { background: #10b981; color: white; padding: 4px 12px; border-radius: 9999px; font-size: 13px; font-weight: bold; }
-        .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
-        .card h2 { font-size: 15px; color: #cbd5e1; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
-        .meta-line { color: #94a3b8; font-size: 13px; margin-bottom: 6px; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 22px; margin-bottom: 20px; }
+        .card h2 { font-size: 16px; color: #cbd5e1; margin-bottom: 14px; }
+        .meta-line { color: #94a3b8; font-size: 14px; margin-bottom: 8px; }
         .meta-line strong { color: #f1f5f9; }
-        .node-box { background: #0f172a; border: 1px solid #475569; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px; word-break: break-all; color: #38bdf8; margin-bottom: 12px; }
-        .sub-box { background: #042f2e; border: 1px solid #14b8a6; color: #2dd4bf; }
-        button { background: #0284c7; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
+        .sub-group { margin-bottom: 18px; }
+        .sub-group:last-child { margin-bottom: 0; }
+        .sub-title { font-size: 13px; color: #94a3b8; margin-bottom: 6px; font-weight: 500; }
+        .sub-box { background: #0f172a; border: 1px solid #334155; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 13px; word-break: break-all; color: #38bdf8; margin-bottom: 8px; }
+        button { background: #0284c7; color: white; border: none; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.2s; }
         button:hover { background: #0369a1; }
-        button.btn-sub { background: #0d9488; }
-        button.btn-sub:hover { background: #0f766e; }
-        .tag { font-size: 11px; padding: 2px 6px; border-radius: 4px; }
-        .tag-rec { background: #059669; color: white; }
+        button.btn-clash { background: #0d9488; }
+        button.btn-clash:hover { background: #0f766e; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>InstaBox 服务管理控制台 <span class="ver-badge">${VERSION}</span></h1>
+            <h1>InstaBox 控制中心 <span class="ver-badge">${VERSION}</span></h1>
             <span class="badge">运行正常 (Active)</span>
         </div>
 
-        <div class="card" style="border: 1px solid #0ea5e9;">
-            <h2 style="color: #38bdf8;">一键订阅地址 (聚合全部节点)</h2>
-            <div class="meta-line">通用订阅 (v2rayN / Sing-box / 蜜蜂版 / 客户端通用):</div>
-            <div class="node-box sub-box" id="sub-url">${subUrl}</div>
-            <button class="btn-sub" onclick="copyText('sub-url')">复制通用订阅链接</button>
+        <div class="card" style="border-color: #0284c7;">
+            <h2 style="color: #38bdf8;">服务订阅中心</h2>
+            
+            <div class="sub-group">
+                <div class="sub-title">通用订阅 (支持 v2rayN / Sing-box / 蜜蜂版 / Shadowrocket，自动包含多协议节点):</div>
+                <div class="sub-box" id="sub-url">${subUrl}</div>
+                <button onclick="copyText('sub-url')">复制通用订阅地址</button>
+            </div>
 
-            <div class="meta-line" style="margin-top: 14px;">Clash / Mihomo 专属配置文件订阅:</div>
-            <div class="node-box sub-box" id="clash-url">${clashUrl}</div>
-            <button class="btn-sub" onclick="copyText('clash-url')">复制 Clash 订阅链接</button>
+            <div class="sub-group" style="margin-top: 18px;">
+                <div class="sub-title">Clash / Mihomo 专用订阅:</div>
+                <div class="sub-box" id="clash-url">${clashUrl}</div>
+                <button class="btn-clash" onclick="copyText('clash-url')">复制 Clash 订阅地址</button>
+            </div>
         </div>
 
         <div class="card">
             <h2>运行环境</h2>
-            <div class="meta-line">当前部署版本: <strong style="color: #38bdf8;">${VERSION}</strong></div>
+            <div class="meta-line">当前版本: <strong style="color: #38bdf8;">${VERSION}</strong></div>
             <div class="meta-line">绑定域名: <strong>${currentDomain}</strong></div>
-            <div class="meta-line">核心模式: <strong>Xray-core 原生单端口复合路由 (8001直通)</strong></div>
-            <div class="meta-line">用户 UUID: <strong>${UUID}</strong></div>
-        </div>
-
-        <div class="card">
-            <h2>1. XHTTP 极速单节点 <span class="tag tag-rec">推荐首选</span></h2>
-            <div class="node-box" id="node-xhttp">${linkXhttp}</div>
-            <button onclick="copyText('node-xhttp')">复制 XHTTP 节点</button>
-        </div>
-
-        <div class="card">
-            <h2>2. gRPC 高并发单节点</h2>
-            <div class="node-box" id="node-grpc">${linkGrpc}</div>
-            <button onclick="copyText('node-grpc')">复制 gRPC 节点</button>
-        </div>
-
-        <div class="card">
-            <h2>3. WebSocket 经典单节点</h2>
-            <div class="node-box" id="node-ws">${linkWs}</div>
-            <button onclick="copyText('node-ws')">复制 WebSocket 节点</button>
+            <div class="meta-line">核心驱动: <strong>Xray-core 原生极速分流 (XHTTP / gRPC / WS)</strong></div>
+            <div class="meta-line">状态守护: <strong>内部防休眠活跃中</strong></div>
         </div>
     </div>
 
@@ -308,7 +295,7 @@ rules:
         function copyText(id) {
             const text = document.getElementById(id).innerText;
             navigator.clipboard.writeText(text).then(function() {
-                alert('已复制到剪贴板！');
+                alert('订阅链接已复制到剪贴板！');
             });
         }
     </script>
@@ -354,7 +341,7 @@ nohup ./keepalive.sh > /dev/null 2>&1 &
 
 sleep 3
 
-# 9. 构造节点与订阅链接并输出
+# 9. 构造订阅链接并输出
 SUB_LINK="https://${TUNNEL_DOMAIN}/sub"
 CLASH_LINK="https://${TUNNEL_DOMAIN}/clash"
 
