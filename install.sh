@@ -1,11 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# InstaBox 终极版 (清爽主页 + 仅显订阅链接与版本号 + Xray多协议 + 内部保活)
+# InstaBox 终极版 (v1.0.6: 集成专属优选域名 + 订阅生成 + 极简主页 + 强杀旧进程)
 # ==============================================================================
 
-# 版本定义 (递增至 v1.0.4)
-SCRIPT_VERSION="v1.0.4"
+SCRIPT_VERSION="v1.0.6"
 
 CF_TOKEN="$1"
 TUNNEL_DOMAIN="$2"
@@ -34,16 +33,15 @@ echo -e "\033[36m====================================================\033[0m"
 echo -e "\033[36m[*] 正在执行部署，当前安装版本: $SCRIPT_VERSION\033[0m"
 echo -e "\033[36m====================================================\033[0m"
 
-# 1. 依赖环境检查
+# 1. 基础依赖检查
 if [ "$(id -u)" -eq 0 ]; then
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -y && apt-get install -y nodejs curl unzip bc procps
     fi
 fi
 
-# 2. 下载官方 cloudflared
+# 2. 准备 cloudflared 客户端
 if [ ! -f "cloudflared" ]; then
-    echo -e "\033[32m[*] 正在下载官方 cloudflared 二进制...\033[0m"
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64) CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" ;;
@@ -54,9 +52,8 @@ if [ ! -f "cloudflared" ]; then
     chmod +x cloudflared
 fi
 
-# 3. 下载 Xray-core
+# 3. 准备 Xray-core
 if [ ! -f "xray" ]; then
-    echo -e "\033[32m[*] 正在拉取 Xray-core 官方极速核心...\033[0m"
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64) XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" ;;
@@ -69,7 +66,7 @@ if [ ! -f "xray" ]; then
     chmod +x xray
 fi
 
-# 4. 生成 Xray 单端口 8001 复合入站
+# 4. 生成 Xray 单端口复合路由配置 (8001 主端口直通，未匹配回落至 8080)
 cat << EOF > config.json
 {
   "log": { "loglevel": "warning" },
@@ -140,30 +137,46 @@ cat << EOF > config.json
 }
 EOF
 
-# 5. 生成清爽 Web 控制中心 (仅保留版本号与订阅链接，移除所有直接节点)
+# 5. 生成集成订阅服务与管理主页的 Web 服务器 (8080 端口)
 cat << 'WEB_EOF' > web_server.js
 const http = require('http');
 const PORT = 8080;
 const DOMAIN = process.env.DOMAIN || '';
 const UUID = process.env.UUID || '';
-const VERSION = process.env.VERSION || 'v1.0.4';
+const VERSION = process.env.VERSION || 'v1.0.6';
+
+// 用户指定的优质优选域名列表
+const PREFERRED_DOMAINS = [
+    { name: "IP.SB优选", host: "ip.sb" },
+    { name: "万事达优选", host: "www.mastercard.com" },
+    { name: "Shopify优选", host: "www.shopify.com" },
+    { name: "VISA优选", host: "www.visa.com" },
+    { name: "SaaS优选", host: "saas.sin.fan" }
+];
 
 const server = http.createServer((req, res) => {
     const currentDomain = DOMAIN || req.headers.host || '127.0.0.1';
-    
-    // 构造节点数据用于生成订阅
-    const linkWs = `vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=ws&host=${currentDomain}&path=%2Fvless#InstaBox-${VERSION}-WS`;
-    const linkGrpc = `vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=grpc&serviceName=vless-grpc&mode=multi&sni=${currentDomain}#InstaBox-${VERSION}-gRPC`;
-    const linkXhttp = `vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&mode=packet-up&sni=${currentDomain}&host=${currentDomain}#InstaBox-${VERSION}-XHTTP`;
 
     // 1. 通用 Base64 订阅接口 (/sub)
     if (req.url === '/sub') {
-        const rawNodes = `${linkXhttp}\n${linkGrpc}\n${linkWs}`;
-        const base64Data = Buffer.from(rawNodes, 'utf-8').toString('base64');
+        const nodeList = [];
+
+        // 官方直连主节点
+        nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&mode=packet-up&sni=${currentDomain}&host=${currentDomain}#InstaBox-${VERSION}-默认直连-XHTTP`);
+        nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=grpc&serviceName=vless-grpc&mode=multi&sni=${currentDomain}#InstaBox-${VERSION}-默认直连-gRPC`);
+        nodeList.push(`vless://${UUID}@${currentDomain}:443?encryption=none&security=tls&type=ws&host=${currentDomain}&path=%2Fvless#InstaBox-${VERSION}-默认直连-WS`);
+
+        // 用户指定优选域名的加速节点 (Address 指向优选，SNI/Host 走原隧道域名)
+        PREFERRED_DOMAINS.forEach(item => {
+            nodeList.push(`vless://${UUID}@${item.host}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&mode=packet-up&sni=${currentDomain}&host=${currentDomain}#InstaBox-${item.name}-XHTTP`);
+            nodeList.push(`vless://${UUID}@${item.host}:443?encryption=none&security=tls&type=ws&host=${currentDomain}&path=%2Fvless&sni=${currentDomain}#InstaBox-${item.name}-WS`);
+        });
+
+        const base64Data = Buffer.from(nodeList.join('\n'), 'utf-8').toString('base64');
         res.writeHead(200, {
             'Content-Type': 'text/plain; charset=utf-8',
-            'Subscription-Userinfo': 'upload=0; download=0; total=107374182400; expire=0',
-            'Profile-Update-Interval': '24'
+            'Cache-Control': 'no-store, no-cache, must-revalidate',
+            'Subscription-Userinfo': 'upload=0; download=0; total=107374182400; expire=0'
         });
         res.end(base64Data);
         return;
@@ -171,13 +184,13 @@ const server = http.createServer((req, res) => {
 
     // 2. Clash / Mihomo 配置文件订阅接口 (/clash)
     if (req.url === '/clash') {
-        const clashYaml = `port: 7890
+        let clashYaml = `port: 7890
 socks-port: 7891
 allow-lan: false
 mode: rule
 log-level: info
 proxies:
-  - name: "InstaBox-${VERSION}-XHTTP"
+  - name: "InstaBox-默认-XHTTP"
     type: vless
     server: ${currentDomain}
     port: 443
@@ -188,17 +201,7 @@ proxies:
     xhttp-opts:
       path: /xhttp
       mode: packet-up
-  - name: "InstaBox-${VERSION}-gRPC"
-    type: vless
-    server: ${currentDomain}
-    port: 443
-    uuid: ${UUID}
-    network: grpc
-    tls: true
-    servername: ${currentDomain}
-    grpc-opts:
-      grpc-service-name: vless-grpc
-  - name: "InstaBox-${VERSION}-WS"
+  - name: "InstaBox-默认-WS"
     type: vless
     server: ${currentDomain}
     port: 443
@@ -210,24 +213,60 @@ proxies:
       path: /vless
       headers:
         Host: ${currentDomain}
-proxy-groups:
-  - name: "自动选择"
+`;
+
+        PREFERRED_DOMAINS.forEach(item => {
+            clashYaml += `  - name: "InstaBox-${item.name}-WS"
+    type: vless
+    server: ${item.host}
+    port: 443
+    uuid: ${UUID}
+    network: ws
+    tls: true
+    servername: ${currentDomain}
+    ws-opts:
+      path: /vless
+      headers:
+        Host: ${currentDomain}
+  - name: "InstaBox-${item.name}-XHTTP"
+    type: vless
+    server: ${item.host}
+    port: 443
+    uuid: ${UUID}
+    network: xhttp
+    tls: true
+    servername: ${currentDomain}
+    xhttp-opts:
+      path: /xhttp
+      mode: packet-up
+`;
+        });
+
+        clashYaml += `proxy-groups:
+  - name: "自动选择(最低延迟)"
     type: url-test
     url: http://www.gstatic.com/generate_204
     interval: 300
     proxies:
-      - "InstaBox-${VERSION}-XHTTP"
-      - "InstaBox-${VERSION}-gRPC"
-      - "InstaBox-${VERSION}-WS"
-rules:
-  - MATCH,自动选择
+      - "InstaBox-默认-XHTTP"
+      - "InstaBox-默认-WS"
 `;
-        res.writeHead(200, { 'Content-Type': 'text/yaml; charset=utf-8' });
+        PREFERRED_DOMAINS.forEach(item => {
+            clashYaml += `      - "InstaBox-${item.name}-WS"\n`;
+            clashYaml += `      - "InstaBox-${item.name}-XHTTP"\n`;
+        });
+
+        clashYaml += `rules:\n  - MATCH,自动选择(最低延迟)\n`;
+
+        res.writeHead(200, {
+            'Content-Type': 'text/yaml; charset=utf-8',
+            'Cache-Control': 'no-store, no-cache, must-revalidate'
+        });
         res.end(clashYaml);
         return;
     }
 
-    // 3. Web 控制台主页 (清爽版，无节点字符串)
+    // 3. Web 控制台主页 (极简展示)
     const subUrl = `https://${currentDomain}/sub`;
     const clashUrl = `https://${currentDomain}/clash`;
 
@@ -235,6 +274,7 @@ rules:
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InstaBox 控制中心 - ${VERSION}</title>
     <style>
@@ -243,7 +283,7 @@ rules:
         .container { max-width: 680px; margin: 0 auto; }
         .header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1e293b; padding-bottom: 16px; margin-bottom: 24px; }
         .header h1 { font-size: 20px; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
-        .ver-badge { background: #0284c7; color: white; padding: 2px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+        .ver-badge { background: #0284c7; color: white; padding: 3px 10px; border-radius: 6px; font-size: 13px; font-weight: bold; }
         .badge { background: #10b981; color: white; padding: 4px 12px; border-radius: 9999px; font-size: 13px; font-weight: bold; }
         .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 22px; margin-bottom: 20px; }
         .card h2 { font-size: 16px; color: #cbd5e1; margin-bottom: 14px; }
@@ -257,6 +297,7 @@ rules:
         button:hover { background: #0369a1; }
         button.btn-clash { background: #0d9488; }
         button.btn-clash:hover { background: #0f766e; }
+        .tag-info { background: #059669; color: white; padding: 2px 6px; border-radius: 4px; font-size: 12px; margin-left: 6px; }
     </style>
 </head>
 <body>
@@ -267,16 +308,16 @@ rules:
         </div>
 
         <div class="card" style="border-color: #0284c7;">
-            <h2 style="color: #38bdf8;">服务订阅中心</h2>
+            <h2 style="color: #38bdf8;">服务订阅中心 <span class="tag-info">已内置 5 组优选域名</span></h2>
             
             <div class="sub-group">
-                <div class="sub-title">通用订阅 (支持 v2rayN / Sing-box / 蜜蜂版 / Shadowrocket，自动包含多协议节点):</div>
+                <div class="sub-title">通用订阅 (支持 v2rayN / Sing-box / 自动包含 IP.SB、VISA、Shopify 等优选节点):</div>
                 <div class="sub-box" id="sub-url">${subUrl}</div>
                 <button onclick="copyText('sub-url')">复制通用订阅地址</button>
             </div>
 
             <div class="sub-group" style="margin-top: 18px;">
-                <div class="sub-title">Clash / Mihomo 专用订阅:</div>
+                <div class="sub-title">Clash / Mihomo 专用订阅 (自动测速选择最低延迟优选):</div>
                 <div class="sub-box" id="clash-url">${clashUrl}</div>
                 <button class="btn-clash" onclick="copyText('clash-url')">复制 Clash 订阅地址</button>
             </div>
@@ -287,7 +328,7 @@ rules:
             <div class="meta-line">当前版本: <strong style="color: #38bdf8;">${VERSION}</strong></div>
             <div class="meta-line">绑定域名: <strong>${currentDomain}</strong></div>
             <div class="meta-line">核心驱动: <strong>Xray-core 原生极速分流 (XHTTP / gRPC / WS)</strong></div>
-            <div class="meta-line">状态守护: <strong>内部防休眠活跃中</strong></div>
+            <div class="meta-line">加速配置: <strong>已注入 ip.sb / mastercard / shopify / visa / saas.sin.fan</strong></div>
         </div>
     </div>
 
@@ -301,7 +342,11 @@ rules:
     </script>
 </body>
 </html>`;
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+
+    res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate'
+    });
     res.end(html);
 });
 
@@ -320,43 +365,42 @@ done
 KEEP_EOF
 chmod +x keepalive.sh
 
-# 7. 清理历史残留进程
-pkill -f "xray" 2>/dev/null
-pkill -f "cloudflared" 2>/dev/null
-pkill -f "node web_server.js" 2>/dev/null
-pkill -f "keepalive.sh" 2>/dev/null
+# 7. 强杀所有历史旧进程
+killall -9 node 2>/dev/null
+killall -9 xray 2>/dev/null
+killall -9 cloudflared 2>/dev/null
+pkill -9 -f "server.js" 2>/dev/null
+pkill -9 -f "web_server.js" 2>/dev/null
+pkill -9 -f "keepalive.sh" 2>/dev/null
 
-# 8. 启动进程
-echo -e "\033[32m[*] 正在后台启动 Web 控制中心与订阅服务 (版本: $SCRIPT_VERSION)...\033[0m"
+sleep 1
+
+# 8. 启动全部进程
+echo -e "\033[32m[*] 启动 Web 控制中心与订阅服务 (版本: $SCRIPT_VERSION)...\033[0m"
 UUID="$UUID" DOMAIN="$TUNNEL_DOMAIN" VERSION="$SCRIPT_VERSION" nohup node web_server.js > web.log 2>&1 &
 
-echo -e "\033[32m[*] 正在启动 Xray 原生多协议分流引擎 (8001 主端口)...\033[0m"
+echo -e "\033[32m[*] 启动 Xray 原生多协议分流引擎...\033[0m"
 nohup ./xray -config config.json > xray.log 2>&1 &
 
-echo -e "\033[32m[*] 正在连接 Cloudflare 官方隧道...\033[0m"
+echo -e "\033[32m[*] 启动 Cloudflare 官方隧道连接...\033[0m"
 nohup ./cloudflared tunnel run --token "$CF_TOKEN" > tunnel.log 2>&1 &
 
-echo -e "\033[32m[*] 正在启动防休眠后台守护...\033[0m"
+echo -e "\033[32m[*] 启动防休眠后台守护...\033[0m"
 nohup ./keepalive.sh > /dev/null 2>&1 &
 
 sleep 3
 
-# 9. 构造订阅链接并输出
+# 9. 输出结果
 SUB_LINK="https://${TUNNEL_DOMAIN}/sub"
 CLASH_LINK="https://${TUNNEL_DOMAIN}/clash"
 
-if ! pgrep -f "cloudflared" > /dev/null; then
-    echo -e "\033[31m[错误] cloudflared 启动失败，最后报错如下：\033[0m"
-    tail -n 10 tunnel.log
-else
-    echo -e "\n\033[32m====================================================\033[0m"
-    echo -e "\033[32m[OK] 部署成功！当前运行版本: \033[33m$SCRIPT_VERSION\033[0m"
-    echo -e "管理控制台: https://${TUNNEL_DOMAIN}"
-    echo -e "----------------------------------------------------"
-    echo -e "\033[32m[通用订阅地址 (Base64)]:\033[0m"
-    echo -e "$SUB_LINK"
-    echo -e ""
-    echo -e "\033[36m[Clash/Mihomo 配置文件订阅]:\033[0m"
-    echo -e "$CLASH_LINK"
-    echo -e "\033[32m====================================================\033[0m\n"
-fi
+echo -e "\n\033[32m====================================================\033[0m"
+echo -e "\033[32m[OK] 部署成功！当前运行版本: \033[33m$SCRIPT_VERSION\033[0m"
+echo -e "管理控制台: https://${TUNNEL_DOMAIN}"
+echo -e "----------------------------------------------------"
+echo -e "\033[32m[通用订阅地址 (已含上述5个优质优选域名)]:\033[0m"
+echo -e "$SUB_LINK"
+echo -e ""
+echo -e "\033[36m[Clash/Mihomo 配置文件订阅]:\033[0m"
+echo -e "$CLASH_LINK"
+echo -e "\033[32m====================================================\033[0m\n"
